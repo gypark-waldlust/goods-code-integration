@@ -78,7 +78,7 @@ def cluster_data(codes, names):
     # min_samples: The number of samples (or total weight) in a neighborhood for a point to be considered as a core point
     # Lower eps = stricter similarity (smaller distance required)
     # eps=0.1 means Cosine Distance <= 0.1, so Cosine Similarity >= 0.9
-    dbscan = DBSCAN(eps=0.2, min_samples=2, metric='cosine')
+    dbscan = DBSCAN(eps=0.2, min_samples=1, metric='cosine')
     labels = dbscan.fit_predict(tfidf_matrix)
     
     # Group by cluster
