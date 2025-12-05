@@ -58,46 +58,63 @@ def create_map_from_csv(file_path):
                     
     return result_map
 
-def cluster_data(codes, names):
-    # Preprocess names for clustering using the user's function
+from sklearn.metrics.pairwise import cosine_similarity
+
+def classify_data_by_targets(codes, names, targets):
+    # Preprocess names for classification
     cleaned_names = [preprocess_text(name) for name in names]
     
-    # Filter out empty names to avoid noise, but we need to keep indices aligned with codes
-    # So we'll just cluster everything, and empty strings will likely form their own cluster or be noise
+    # Combine targets and cleaned names for vectorization to ensure same feature space
+    all_texts = targets + cleaned_names
     
     # Vectorize
-    vectorizer = TfidfVectorizer()
+    # Use char n-grams to capture partial matches (e.g. "에이드" inside "레몬에이드")
+    vectorizer = TfidfVectorizer(analyzer='char', ngram_range=(2, 3))
     try:
-        tfidf_matrix = vectorizer.fit_transform(cleaned_names)
+        tfidf_matrix = vectorizer.fit_transform(all_texts)
     except ValueError:
-        print("Error: No valid data to cluster.")
-        return {}
+        print("Error: No valid data to classify.")
+        return {}, {}, None
 
-    # Cluster using DBSCAN
-    # eps: maximum distance between two samples for one to be considered as in the neighborhood of the other
-    # min_samples: The number of samples (or total weight) in a neighborhood for a point to be considered as a core point
-    # Lower eps = stricter similarity (smaller distance required)
-    # eps=0.1 means Cosine Distance <= 0.1, so Cosine Similarity >= 0.9
-    dbscan = DBSCAN(eps=0.2, min_samples=1, metric='cosine')
-    labels = dbscan.fit_predict(tfidf_matrix)
+    # Split matrix back into targets and items
+    target_vectors = tfidf_matrix[:len(targets)]
+    item_vectors = tfidf_matrix[len(targets):]
     
-    # Group by cluster
+    # Calculate similarity between items and targets
+    # Shape: (n_items, n_targets)
+    similarity_matrix = cosine_similarity(item_vectors, target_vectors)
+    
+    # Classify
     clusters = {}
-    cluster_indices = {} # Store indices to retrieve vectors later
+    cluster_indices = {}
     
-    for idx, (code, name, cleaned_name, label) in enumerate(zip(codes, names, cleaned_names, labels)):
-        # Optional: Skip items that became empty after preprocessing if desired
+    # Initialize clusters for all targets
+    for target in targets:
+        clusters[target] = []
+        cluster_indices[target] = []
+    clusters['Unclassified'] = []
+    cluster_indices['Unclassified'] = []
+    
+    threshold = 0.1 # Minimum similarity to be classified
+    
+    for idx, (code, name, cleaned_name) in enumerate(zip(codes, names, cleaned_names)):
         if not cleaned_name.strip():
             continue
             
-        if label not in clusters:
-            clusters[label] = []
-            cluster_indices[label] = []
-            
-        clusters[label].append((code, name, cleaned_name))
-        cluster_indices[label].append(idx)
+        # Find best matching target
+        similarities = similarity_matrix[idx]
+        best_target_idx = np.argmax(similarities)
+        best_score = similarities[best_target_idx]
         
-    return clusters, cluster_indices, tfidf_matrix
+        if best_score >= threshold:
+            target = targets[best_target_idx]
+            clusters[target].append((code, name, cleaned_name, best_score))
+            cluster_indices[target].append(idx)
+        else:
+            clusters['Unclassified'].append((code, name, cleaned_name, 0.0))
+            cluster_indices['Unclassified'].append(idx)
+            
+    return clusters, cluster_indices
 
 if __name__ == "__main__":
     file_path = 'waldpos_public_base_goods.csv'
@@ -117,50 +134,44 @@ if __name__ == "__main__":
         # Verify alignment
         if len(codes) != len(names):
             print(f"Warning: Column lengths mismatch! Codes: {len(codes)}, Names: {len(names)}")
-            # Truncate to shorter length
             min_len = min(len(codes), len(names))
             codes = codes[:min_len]
             names = names[:min_len]
         
-        print(f"Clustering {len(codes)} items...")
-        clusters, cluster_indices, tfidf_matrix = cluster_data(codes, names)
+        # Define Targets
+        targets = [
+            "아메리카노", "라떼", "프라페", "스무디", "에이드", "티", "차", 
+            "쥬스", "요거트", "버블티", "디저트", "케이크", "빵", "베이글", 
+            "핫도그", "쿠키", "마카롱", "세트"
+        ]
+        
+        print(f"Classifying {len(codes)} items into {len(targets)} targets...")
+        clusters, cluster_indices = classify_data_by_targets(codes, names, targets)
         
         if clusters:
-            # Sort clusters by size
-            sorted_labels = sorted(clusters.keys(), key=lambda k: len(clusters[k]), reverse=True)
-            
             output_file = 'clustering_results.txt'
             print(f"Writing results to {output_file}...")
             
             with open(output_file, 'w', encoding='utf-8') as f:
-                f.write("=== Clustering Results ===\n")
-                from sklearn.metrics.pairwise import cosine_similarity
+                f.write("=== Target-based Classification Results ===\n")
                 
-                for label in sorted_labels:
-                    items = clusters[label]
-                    indices = cluster_indices[label]
+                # Sort targets by count
+                sorted_targets = sorted(clusters.keys(), key=lambda k: len(clusters[k]), reverse=True)
+                
+                for target in sorted_targets:
+                    items = clusters[target]
                     
-                    if label == -1:
-                        f.write(f"\n[Noise] (Count: {len(items)})\n")
-                    else:
-                        f.write(f"\n[Cluster {label}] (Count: {len(items)})\n")
-                        
-                        # Calculate similarity stats for the cluster
-                        if len(indices) > 1:
-                            # Get vectors for this cluster
-                            vectors = tfidf_matrix[indices]
-                            # Calculate pairwise similarity
-                            sim_matrix = cosine_similarity(vectors)
-                            # Get upper triangle values (excluding diagonal)
-                            sim_values = sim_matrix[np.triu_indices(len(indices), k=1)]
-                            avg_sim = np.mean(sim_values)
-                            min_sim = np.min(sim_values)
-                            f.write(f"  > Avg Similarity: {avg_sim:.4f}, Min Similarity: {min_sim:.4f}\n")
+                    f.write(f"\n[Target: {target}] (Count: {len(items)})\n")
                     
                     # Print items in cluster
-                    for code, name, cleaned in items:
-                        f.write(f"  - [{code}] {name} -> (Cleaned: {cleaned})\n")
+                    # Sort by score desc
+                    items.sort(key=lambda x: x[3], reverse=True)
+                    
+                    for code, name, cleaned, score in items:
+                        f.write(f"  - [{code}] {name} -> (Cleaned: {cleaned}) [Sim: {score:.4f}]\n")
             
             print("Done.")
     else:
         print("Error: Need at least 2 columns (Code and Name) to cluster.")
+
+
