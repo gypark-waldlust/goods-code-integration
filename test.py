@@ -5,8 +5,8 @@ from sklearn.cluster import DBSCAN
 import numpy as np
 
 def preprocess_text(text):
-    # 1. Remove content inside square brackets
-    text = re.sub(r'\[.*?\]', '', text)
+    # 1. Remove content inside square brackets, parentheses, and curly braces
+    text = re.sub(r'\([^)]*\)|\[[^]]*\]|\{[^}]*\}', '', text)
     
     # --- 💡 조건부 영어 제거 로직 시작 ---
     
@@ -77,21 +77,27 @@ def cluster_data(codes, names):
     # eps: maximum distance between two samples for one to be considered as in the neighborhood of the other
     # min_samples: The number of samples (or total weight) in a neighborhood for a point to be considered as a core point
     # Lower eps = stricter similarity (smaller distance required)
-    dbscan = DBSCAN(eps=0.3, min_samples=2, metric='cosine')
+    # eps=0.1 means Cosine Distance <= 0.1, so Cosine Similarity >= 0.9
+    dbscan = DBSCAN(eps=0.2, min_samples=2, metric='cosine')
     labels = dbscan.fit_predict(tfidf_matrix)
     
     # Group by cluster
     clusters = {}
-    for code, name, cleaned_name, label in zip(codes, names, cleaned_names, labels):
+    cluster_indices = {} # Store indices to retrieve vectors later
+    
+    for idx, (code, name, cleaned_name, label) in enumerate(zip(codes, names, cleaned_names, labels)):
         # Optional: Skip items that became empty after preprocessing if desired
         if not cleaned_name.strip():
             continue
             
         if label not in clusters:
             clusters[label] = []
+            cluster_indices[label] = []
+            
         clusters[label].append((code, name, cleaned_name))
+        cluster_indices[label].append(idx)
         
-    return clusters
+    return clusters, cluster_indices, tfidf_matrix
 
 if __name__ == "__main__":
     file_path = 'waldpos_public_base_goods.csv'
@@ -117,24 +123,44 @@ if __name__ == "__main__":
             names = names[:min_len]
         
         print(f"Clustering {len(codes)} items...")
-        clusters = cluster_data(codes, names)
+        clusters, cluster_indices, tfidf_matrix = cluster_data(codes, names)
         
         if clusters:
             # Sort clusters by size
             sorted_labels = sorted(clusters.keys(), key=lambda k: len(clusters[k]), reverse=True)
             
-            print("\n=== Clustering Results ===")
-            for label in sorted_labels:
-                items = clusters[label]
-                if label == -1:
-                    print(f"\n[Noise] (Count: {len(items)})")
-                else:
-                    print(f"\n[Cluster {label}] (Count: {len(items)})")
+            output_file = 'clustering_results.txt'
+            print(f"Writing results to {output_file}...")
+            
+            with open(output_file, 'w', encoding='utf-8') as f:
+                f.write("=== Clustering Results ===\n")
+                from sklearn.metrics.pairwise import cosine_similarity
                 
-                # Print first 5 items in cluster
-                for code, name, cleaned in items[:5]:
-                    print(f"  - [{code}] {name} -> (Cleaned: {cleaned})")
-                if len(items) > 5:
-                    print(f"  ... and {len(items)-5} more")
+                for label in sorted_labels:
+                    items = clusters[label]
+                    indices = cluster_indices[label]
+                    
+                    if label == -1:
+                        f.write(f"\n[Noise] (Count: {len(items)})\n")
+                    else:
+                        f.write(f"\n[Cluster {label}] (Count: {len(items)})\n")
+                        
+                        # Calculate similarity stats for the cluster
+                        if len(indices) > 1:
+                            # Get vectors for this cluster
+                            vectors = tfidf_matrix[indices]
+                            # Calculate pairwise similarity
+                            sim_matrix = cosine_similarity(vectors)
+                            # Get upper triangle values (excluding diagonal)
+                            sim_values = sim_matrix[np.triu_indices(len(indices), k=1)]
+                            avg_sim = np.mean(sim_values)
+                            min_sim = np.min(sim_values)
+                            f.write(f"  > Avg Similarity: {avg_sim:.4f}, Min Similarity: {min_sim:.4f}\n")
+                    
+                    # Print items in cluster
+                    for code, name, cleaned in items:
+                        f.write(f"  - [{code}] {name} -> (Cleaned: {cleaned})\n")
+            
+            print("Done.")
     else:
         print("Error: Need at least 2 columns (Code and Name) to cluster.")
